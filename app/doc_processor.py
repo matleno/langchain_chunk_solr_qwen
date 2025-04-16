@@ -5,7 +5,6 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from transformers import AutoTokenizer
-#from app.config import Config
 from app.prompt import query_chain, sintesi_chain, rag_chain
 import os
 from dotenv import load_dotenv
@@ -18,6 +17,7 @@ TOP_K_CHUNK = int(os.getenv("TOP_K_CHUNK", "12"))
 TOKEN_MAX = int(os.getenv("TOKEN_MAX", "4500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1500"))
+SINTESI = int(os.getenv("SINTESI", "False"))
 
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained(
@@ -29,7 +29,7 @@ tokenizer = AutoTokenizer.from_pretrained(
 def count_tokens(text: str) -> int:
     return len(tokenizer.encode(text))
 
-# Solr and model
+# Solr e modello per embeddings
 solr = pysolr.Solr(SOLR_ADDRESS, always_commit=True)
 model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
 
@@ -49,7 +49,7 @@ def chunk_documenti(text: str, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLA
 
 def generate_query(user_question: str) -> str:
     generated_query = query_chain.invoke({"question": user_question})
-    # Cleanup any formatting
+    # query_chain restituisce query:""
     generated_query = re.sub(r'^(query:|q:)\s*', '', generated_query, flags=re.IGNORECASE)
     return generated_query.strip().strip('"')
 
@@ -58,7 +58,7 @@ def process_documents(question: str, query: str,
                       top_k_chunk=TOP_K_CHUNK,
                       token_max=TOKEN_MAX,
                       use_sintesi=False):
-    print(f"*** Avvio elaborazione per: {query} - doc da solr -> {top_k} chunk -> {top_k_chunk} ***")
+    print(f"*** Avvio per: {query} - doc da solr -> {top_k} chunk -> {top_k_chunk} ***")
 
     query_embedding = model.encode([query])
     # Query Solr (knn)
@@ -73,6 +73,8 @@ def process_documents(question: str, query: str,
     all_chunks = []
     for idx, doc in enumerate(results, 1):
         full_text = clean_text(doc.get("Testo", ""))
+        print("\n**** Documento numero ", idx, ": ", full_text)
+        print("Documento solr numero", idx, ":","-"*50 ,"\n", full_text, "\n", "-"*50)	
         small_docs = chunk_documenti(full_text)
         
         # embedding chunk
@@ -90,8 +92,16 @@ def process_documents(question: str, query: str,
     while top_k_chunk > 0:
         top_chunks = all_chunks[:top_k_chunk]
         final_context = []
+        
+        for i, (chunk_text_str, sim) in enumerate(top_chunks, start=1):
+            print(f"\n--- Chunk {i} ---")
+            print(f"Similarity: {sim}")
+            print(f"Lunghezza: {len(chunk_text_str)}")
+            print(f"testo: {chunk_text_str!r}")
+            if i == 5: # visualizza 5 chunk
+                break
 
-        # Se "use_sintesi"==True, sintetizza ogni chunk, altrimenti usa il chunk così com'è
+        # Se "sintesi"==True, sintetizza ogni chunk, altrimenti usa il chunk così com'è
         for i, (chunk_str, sim) in enumerate(top_chunks):
             if use_sintesi:
                 summary = sintesi_chain.invoke({"document": chunk_str})
@@ -114,6 +124,6 @@ def process_documents(question: str, query: str,
             })
             end = time.time()
             print(f"Tempo impiegato: {end - start} secondi")
-            return risposta.strip()  # fine, rientrato nei limiti
+            return risposta.strip() 
 
-    return "Non posso rispondere (limite superato)."
+    return "ERRORE, Non posso rispondere."
