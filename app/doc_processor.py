@@ -61,7 +61,7 @@ def process_documents(question: str, query: str,
     print(f"*** Avvio per: {query} - doc da solr -> {top_k} chunk -> {top_k_chunk} ***")
 
     query_embedding = model.encode([query])
-    # Query Solr (knn)
+    query_normalized = query_embedding / np.linalg.norm(query_embedding)
     results = solr.search(
         fl=['ID', 'Testo', 'vector', 'score'],
         q=f"{{!knn f=vector topK={top_k}}}{[float(w) for w in query_embedding[0]]}",
@@ -81,10 +81,11 @@ def process_documents(question: str, query: str,
         for chunk_doc in small_docs:
             chunk_text_str = chunk_doc.page_content
             chunk_embedding = model.encode([chunk_text_str])[0]
-            sim = np.dot(query_embedding, chunk_embedding) / (
-                np.linalg.norm(query_embedding) * np.linalg.norm(chunk_embedding)
-            )
-            all_chunks.append((chunk_text_str, sim))
+            #nomalizzazione
+            chunk_normalized = chunk_embedding / np.linalg.norm(chunk_embedding)
+            # calcolo similarità   
+            sim = np.dot(query_embedding, chunk_embedding)
+            all_chunks.append((chunk_text_str, sim))         
 
     # Ordina e seleziona
     all_chunks.sort(key=lambda x: x[1], reverse=True)
