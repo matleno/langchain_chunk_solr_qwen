@@ -7,9 +7,20 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from transformers import AutoTokenizer
 from app.prompt import query_chain, sintesi_chain, rag_chain
 import os
+import logging
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+# 2) Silence noisy third‑party modules
+logging.getLogger("werkzeug").setLevel(logging.INFO)
+logging.getLogger("openai").setLevel(logging.INFO)
+logging.getLogger("openai._base_client").setLevel(logging.INFO)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+logger = logging.getLogger(__name__)
+#logger.setLevel(logging.INFO)
 
 SOLR_ADDRESS = os.getenv("SOLR_ADDRESS", "http://localhost:8983/solr/pc")
 TOP_K = int(os.getenv("TOP_K", "35"))
@@ -17,7 +28,7 @@ TOP_K_CHUNK = int(os.getenv("TOP_K_CHUNK", "12"))
 TOKEN_MAX = int(os.getenv("TOKEN_MAX", "4500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1500"))
-SINTESI = int(os.getenv("SINTESI", "False"))
+SINTESI = os.getenv("SINTESI", "False")
 
 # Initialize tokenizer
 tokenizer = AutoTokenizer.from_pretrained(
@@ -53,18 +64,24 @@ def generate_query(user_question: str) -> str:
     generated_query = re.sub(r'^(query:|q:)\s*', '', generated_query, flags=re.IGNORECASE)
     return generated_query.strip().strip('"')
 
+
 def process_documents(question: str, query: str, 
                       top_k=TOP_K,
                       top_k_chunk=TOP_K_CHUNK,
                       token_max=TOKEN_MAX,
                       use_sintesi=False):
-    print(f"*** Avvio per: {query} - doc da solr -> {top_k} chunk -> {top_k_chunk} ***")
+    
+    logger.info(
+        "Avvio per: %r – doc da solr → %d, chunk → %d",
+        query, top_k, top_k_chunk
+        )
 
     query_embedding = model.encode([query])
     query_normalized = query_embedding / np.linalg.norm(query_embedding)
+    
     results = solr.search(
         fl=['ID', 'Testo', 'vector', 'score'],
-        q=f"{{!knn f=vector topK={top_k}}}{[float(w) for w in query_embedding[0]]}",
+        q=f"{{!knn f=vector topK={top_k}}}{[float(w) for w in query_embedding[0]]}", 
         fq="Fonte:Comuni",
         rows=top_k
     )
@@ -73,10 +90,12 @@ def process_documents(question: str, query: str,
     all_chunks = []
     for idx, doc in enumerate(results, 1):
         full_text = clean_text(doc.get("Testo", ""))
-        print("\n**** Documento numero ", idx, ": ", full_text)
-        print("Documento solr numero", idx, ":","-"*50 ,"\n", full_text, "\n", "-"*50)	
+        #print("\n**** Documento numero ", idx, ": ", full_text)
+        logger.info("*****Documento Solr numero: %d – Testo: \n %r",
+                    idx, full_text[:200])
+        #print("Documento solr numero", idx, ":","-"*50 ,"\n", full_text[:200], "\n", "-"*50)	
         small_docs = chunk_documenti(full_text)
-        
+           
         # embedding chunk
         for chunk_doc in small_docs:
             chunk_text_str = chunk_doc.page_content
@@ -84,14 +103,15 @@ def process_documents(question: str, query: str,
             #nomalizzazione
             chunk_normalized = chunk_embedding / np.linalg.norm(chunk_embedding)
             # calcolo similarità   
-            sim = np.dot(query_embedding, chunk_embedding)
+            sim = np.dot(query_normalized, chunk_normalized)
             all_chunks.append((chunk_text_str, sim))         
 
     # Ordina e seleziona
     all_chunks.sort(key=lambda x: x[1], reverse=True)
-
+    
     while top_k_chunk > 0:
         top_chunks = all_chunks[:top_k_chunk]
+
         final_context = []
         
         for i, (chunk_text_str, sim) in enumerate(top_chunks, start=1):
@@ -105,7 +125,10 @@ def process_documents(question: str, query: str,
         # Se "sintesi"==True, sintetizza ogni chunk, altrimenti usa il chunk così com'è
         for i, (chunk_str, sim) in enumerate(top_chunks):
             if use_sintesi:
+                logger.info("avvio sintesi per chunk %d", i+1)
                 summary = sintesi_chain.invoke({"document": chunk_str})
+                logger.info("fine sintesi per chunk %d", i+1)
+
                 final_context.append(f"DOCUMENTO {i+1}:\n{summary.strip()}")
             else:
                 final_context.append(f"DOCUMENTO {i+1}:\n{chunk_str.strip()}")
@@ -114,11 +137,13 @@ def process_documents(question: str, query: str,
         token_count = count_tokens(contesto)
 
         if token_count > token_max:
+            logger.info("Limite token superato, riduzione di chunk recuperati da %d a %d", top_k_chunk, top_k_chunk - 1)
             # riduci chunk finché non rientri nei limiti
             top_k_chunk -= 1
         else:
             # Genera la risposta
             start = time.time()
+            logger.info("Avvio generazione risposta finale")              
             risposta = rag_chain.invoke({
                 "document": contesto,
                 "question": question
@@ -127,4 +152,4 @@ def process_documents(question: str, query: str,
             print(f"Tempo impiegato: {end - start} secondi")
             return risposta.strip() 
 
-    return "ERRORE, Non posso rispondere."
+    return "ERRORE, Non posso rispondere."  
